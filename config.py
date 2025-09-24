@@ -4,29 +4,25 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class Settings:
-    PROJECT_NAME: str = "AI Research Paper Analyzer (Streamlit)"
+    # --- Project Info ---
+    PROJECT_NAME: str = "FlowChat: AquaQuery Oceanographic Assistant"
+
+    # --- API Keys & Models ---
     GROQ_API_KEY: str = os.getenv("GROQ_API_KEY")
-    LLM_MODEL: str = os.getenv("LLM_MODEL", "llama3-70b-8192") # Or user's llama-3.3-70b-versatile if valid
+    LLM_MODEL: str = os.getenv("LLM_MODEL", "llama3-70b-8192")
 
+    # --- File Handling ---
     UPLOAD_DIR: str = "temp_uploaded_pdfs"
-    if not os.path.exists(UPLOAD_DIR):
-        os.makedirs(UPLOAD_DIR, exist_ok=True) # Ensure directory exists
 
-    ANALYSIS_OPTIONS = {
-        "summary": "📄 Comprehensive Summary",
-        "critical_analysis": "🧐 Critical Analysis",
-        "gaps": "🔍 Research Gaps",
-        "suggestions": "💡 Future Work & Suggestions"
-    }
-
-    # New settings for chunking
-    # Target characters per chunk. ~4 chars/token. Aim for ~4000-5000 tokens per chunk payload.
-    # If prompt is ~1000-1500 tokens, text chunk should be ~2500-3500 tokens.
-    # 3000 tokens * 4 chars/token = 12000 characters per chunk.
-    CHUNK_TARGET_CHAR_COUNT: int = 12000
-    CHUNK_OVERLAP_CHAR_COUNT: int = 500 # Overlap to maintain context between chunks
+    # --- RAG Configuration ---
+    EMBEDDING_MODEL_NAME: str = "all-MiniLM-L6-v2"
+    TOP_K: int = 5 # Number of relevant chunks to retrieve
 
 settings = Settings()
 
+# --- Initial Setup ---
+if not os.path.exists(settings.UPLOAD_DIR):
+    os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
+
 if not settings.GROQ_API_KEY:
-    raise ValueError("GROQ_API_KEY not found. Please set it in your .env file.")
+    raise ValueError("GROQ_API_KEY not found. Please set it in your .env file or as an environment variable.")
