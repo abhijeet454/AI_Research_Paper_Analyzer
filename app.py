@@ -1,170 +1,152 @@
+# app.py
+
 import streamlit as st
 import os
 import uuid
 from config import settings
 from pdf_utils import extract_text_from_pdf, PDFParsingError
-from llm_utils import get_llm_analysis, LLMAnalysisError # get_llm_analysis handles chunking internally
+from llm_utils import get_rag_response_stream, LLMAnalysisError
+from rag_utils import RAGVectorStore
+from preloaded_data import preload_data_to_store
+from chunking import SemanticChunker
 import logging
+import time
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(streamlit)s - %(levelname)s - %(message)s')
+# --- Setup & Initialization ---
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 st.set_page_config(page_title=settings.PROJECT_NAME, layout="wide")
 
-st.markdown(f"""
-    <style>
-        .reportview-container .main .block-container{{
-            padding-top: 2rem; padding-right: 2rem; padding-left: 2rem; padding-bottom: 2rem;
-        }}
-        .stButton>button {{ width: 100%; border-radius: 0.5rem; }}
-        .stMultiSelect [data-baseweb="tag"] {{ background-color: #0078D4; color: white; }}
-    </style>
-    """, unsafe_allow_html=True)
+# --- Session State Initialization ---
+def initialize_session_state():
+    """Initializes session state variables if they don't exist."""
+    if 'rag_store' not in st.session_state:
+        st.session_state.rag_store = RAGVectorStore()
+        st.session_state.processed_files = set()
+        logger.info("Initialized RAGVectorStore and processed_files in session state.")
 
-st.title(f"🔬 {settings.PROJECT_NAME} (Enhanced with Chunking)")
-st.markdown("Upload a research paper (PDF) for AI-powered analysis. Now capable of handling larger documents!")
-st.markdown(f"Powered by Groq and Llama 3 (Model: `{settings.LLM_MODEL}`). Chunk size: ~{settings.CHUNK_TARGET_CHAR_COUNT} chars.")
-
-if 'analysis_results' not in st.session_state:
-    st.session_state.analysis_results = {}
-if 'current_pdf_name' not in st.session_state:
-    st.session_state.current_pdf_name = None
-if 'error_message' not in st.session_state:
-    st.session_state.error_message = None
-if 'processing' not in st.session_state:
-    st.session_state.processing = False
-
-uploaded_file = st.file_uploader("📂 Choose a PDF research paper", type="pdf", key="pdf_uploader")
-
-st.sidebar.header("⚙️ Analysis Configuration")
-selected_analysis_types_display = st.sidebar.multiselect(
-    "Select Analysis Types:",
-    options=list(settings.ANALYSIS_OPTIONS.keys()),
-    format_func=lambda x: settings.ANALYSIS_OPTIONS[x],
-    default=["summary", "gaps"],
-    key="analysis_selector"
-)
-
-st.sidebar.subheader("Advanced (Optional)")
-custom_model_name = st.sidebar.text_input(
-    "Override LLM Model", 
-    value=settings.LLM_MODEL, 
-    help=f"Default: {settings.LLM_MODEL}. Ensure the model is available on Groq.",
-    key="model_override"
-)
-# CHUNK_TARGET_CHAR_COUNT can be made configurable here if desired
-
-analyze_button = st.button("🚀 Analyze Paper", type="primary", disabled=st.session_state.processing, key="analyze_button")
-
-# Placeholders for status messages and progress bar
-status_placeholder_main = st.empty() # For PDF parsing status
-status_placeholder_llm = st.empty()  # For LLM chunk processing status
-progress_bar = st.empty()
-
-if analyze_button and uploaded_file is not None:
-    if not selected_analysis_types_display:
-        st.error("⚠️ Please select at least one analysis type from the sidebar.")
-    else:
-        st.session_state.processing = True
-        st.session_state.error_message = None
-        st.session_state.analysis_results = {}
-        st.session_state.current_pdf_name = uploaded_file.name
-        
-        # Clear previous placeholders
-        status_placeholder_main.empty()
-        status_placeholder_llm.empty()
-        progress_bar.empty()
-        
-        # Re-initialize placeholders for the current run
-        current_status_main = status_placeholder_main.container()
-        current_status_llm = status_placeholder_llm.container() # For LLM specific messages
-        current_progress_bar = progress_bar.progress(0)
-
-
-        temp_file_path = os.path.join(settings.UPLOAD_DIR, f"{uuid.uuid4().hex}_{uploaded_file.name}")
-        
-        try:
-            with open(temp_file_path, "wb") as f:
-                f.write(uploaded_file.getbuffer())
-            logger.info(f"Uploaded file saved temporarily to: {temp_file_path}")
-
-            current_status_main.info(f"⏳ Parsing PDF '{uploaded_file.name}'...")
-            extracted_text = extract_text_from_pdf(temp_file_path)
-            logger.info(f"PDF parsing successful for {uploaded_file.name}. Text length: {len(extracted_text)}")
-            current_status_main.success(f"✅ PDF Parsed. Total characters: {len(extracted_text):,}")
-            current_progress_bar.progress(0.1) # 10% after PDF parsing
-
-            # LLM Analysis for each selected type using the status placeholder from llm_utils
-            total_llm_analyses = len(selected_analysis_types_display)
-            for i, analysis_key in enumerate(selected_analysis_types_display):
-                analysis_display_name = settings.ANALYSIS_OPTIONS[analysis_key]
-                current_status_main.info(f"✨ Starting '{analysis_display_name}'...")
-                
-                # Pass the llm_status_placeholder to the analysis function
-                # It will be updated inside get_llm_analysis during chunk processing
-                try:
-                    # The get_llm_analysis will use its own status_placeholder for chunk progress
-                    # Here we just indicate which overall analysis is running
-                    analysis_result = get_llm_analysis(
-                        extracted_text, 
-                        analysis_key, 
-                        model_name=custom_model_name or settings.LLM_MODEL,
-                        streamlit_status_placeholder=current_status_llm # Pass placeholder here
-                    )
-                    st.session_state.analysis_results[analysis_key] = analysis_result
-                    logger.info(f"Successfully completed '{analysis_display_name}' for {uploaded_file.name}.")
-                except LLMAnalysisError as llm_err:
-                    logger.error(f"LLM Analysis Error for {analysis_display_name}: {llm_err}", exc_info=True)
-                    st.session_state.analysis_results[analysis_key] = f"❌ Error during '{analysis_display_name}': {str(llm_err)}"
-                except Exception as gen_err:
-                    logger.error(f"Unexpected Error for {analysis_display_name}: {gen_err}", exc_info=True)
-                    st.session_state.analysis_results[analysis_key] = f"❌ Unexpected error for '{analysis_display_name}': {str(gen_err)}"
-                
-                current_progress_bar.progress(0.1 + (0.9 * ((i + 1) / total_llm_analyses)))
-                current_status_llm.empty() # Clear LLM specific status after each analysis type
-
-            current_status_main.success(f"✅ All analyses complete for '{uploaded_file.name}'!")
-            current_progress_bar.progress(1.0)
-
-        except PDFParsingError as pdf_err:
-            logger.error(f"PDF Parsing Error: {pdf_err}", exc_info=True)
-            st.session_state.error_message = f"❌ PDF Parsing Failed: {str(pdf_err)}"
-            current_status_main.error(st.session_state.error_message)
-        except Exception as e:
-            logger.error(f"An unexpected error occurred: {e}", exc_info=True)
-            st.session_state.error_message = f"❌ An unexpected error occurred: {str(e)}"
-            current_status_main.error(st.session_state.error_message)
-        finally:
-            if os.path.exists(temp_file_path):
-                try:
-                    os.remove(temp_file_path)
-                    logger.info(f"Cleaned up temporary file: {temp_file_path}")
-                except OSError as e_remove:
-                    logger.error(f"Error removing temporary file {temp_file_path}: {e_remove}")
-            st.session_state.processing = False
-            # Clear placeholders explicitly after processing
-            status_placeholder_main.empty()
-            status_placeholder_llm.empty()
-            progress_bar.empty()
-            st.rerun() # Use st.rerun()
-
-elif analyze_button and uploaded_file is None:
-    st.warning("☝️ Please upload a PDF file first.")
-
-if st.session_state.error_message and not st.session_state.processing:
-    st.error(st.session_state.error_message)
-
-if st.session_state.analysis_results and st.session_state.current_pdf_name:
-    st.markdown("---")
-    st.header(f"📊 Analysis Results for: _{st.session_state.current_pdf_name}_")
+        with st.spinner("Loading initial knowledge base..."):
+            processed_filenames = preload_data_to_store(st.session_state.rag_store)
+            for name in processed_filenames:
+                st.session_state.processed_files.add(name)
     
-    for analysis_key, result_text in st.session_state.analysis_results.items():
-        display_name = settings.ANALYSIS_OPTIONS.get(analysis_key, analysis_key.replace("_", " ").title())
-        with st.expander(f"**{display_name}**", expanded=True):
-            if isinstance(result_text, str) and "❌ Error" in result_text:
-                st.error(result_text)
-            else:
-                st.markdown(result_text, unsafe_allow_html=True)
+    if 'chat_history' not in st.session_state:
+        st.session_state.chat_history = []
+        logger.info("Initialized chat_history in session state.")
+    
+    if 'semantic_chunker' not in st.session_state:
+        st.session_state.semantic_chunker = SemanticChunker(st.session_state.rag_store.embedding_model)
 
-st.markdown("---")
-st.markdown("ℹ️ **Note:** Analysis quality depends on PDF text clarity and LLM capabilities. Always critically evaluate outputs.")
+initialize_session_state()
+
+# --- UI Styles ---
+st.markdown("""
+    <style>
+        .stChatMessage {
+            border-radius: 10px;
+            padding: 1rem;
+            margin-bottom: 1rem;
+        }
+        .stChatMessage[data-testid="stChatMessageContent"] {
+            background-color: #f8f9fa;
+        }
+    </style>
+""", unsafe_allow_html=True)
+
+
+# --- Sidebar ---
+with st.sidebar:
+    st.header("📚 Document Management")
+    uploaded_files = st.file_uploader("Upload PDF files", type="pdf", accept_multiple_files=True)
+
+    if uploaded_files:
+        for uploaded_file in uploaded_files:
+            if uploaded_file.name not in st.session_state.processed_files:
+                with st.spinner(f"Processing {uploaded_file.name}..."):
+                    try:
+                        temp_path = os.path.join(settings.UPLOAD_DIR, uploaded_file.name)
+                        with open(temp_path, "wb") as f:
+                            f.write(uploaded_file.getvalue())
+                        
+                        text = extract_text_from_pdf(temp_path)
+                        chunks = st.session_state.semantic_chunker.chunk(text)
+                        st.session_state.rag_store.add_texts(chunks, source=uploaded_file.name)
+                        
+                        st.session_state.processed_files.add(uploaded_file.name)
+                        st.success(f"✅ Indexed {uploaded_file.name}")
+                        os.remove(temp_path)
+                    except Exception as e:
+                        st.error(f"❌ Error processing {uploaded_file.name}: {e}")
+
+    st.subheader("Indexed Documents")
+    if not st.session_state.processed_files:
+        st.info("Knowledge base is empty. Upload a PDF or add files to the 'data' folder.")
+    else:
+        for file_name in sorted(list(st.session_state.processed_files)):
+            st.markdown(f"- `{file_name}`")
+
+    if st.button("Clear All Data & Chats"):
+        # Clear specific session state keys instead of wiping the whole state
+        st.session_state.rag_store.clear()
+        st.session_state.chat_history = []
+        st.session_state.processed_files = set()
+        st.rerun()
+
+# --- Main Chat Interface ---
+st.title("🌊 FlowChat: AquaQuery Oceanographic Assistant")
+st.markdown("Your assistant for understanding oceanographic research. Ask questions and get cited answers.")
+
+# Display chat history
+for message in st.session_state.chat_history:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
+        if "sources" in message and message["sources"]:
+            with st.expander("View Sources"):
+                for source in message["sources"]:
+                    # Use st.info or st.code for better visual separation of sources
+                    st.info(f"**Source Document:** `{source['source']}`\n\n**Content:**\n\n> {source['text'].replace('$', '//$')}")
+
+# Handle new chat input
+if prompt := st.chat_input("Ask AquaQuery about your documents..."):
+    st.session_state.chat_history.append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.markdown(prompt)
+
+    with st.chat_message("assistant"):
+        try:
+            if st.session_state.rag_store.index.ntotal == 0:
+                st.warning("The knowledge base is empty. Please upload documents before asking questions.")
+                st.session_state.chat_history.append({"role": "assistant", "content": "The knowledge base is empty."})
+            else:
+                with st.spinner("Searching documents..."):
+                    retrieved_docs = st.session_state.rag_store.query(prompt, top_k=settings.TOP_K)
+                    context_parts = [f"--- Excerpt from {doc['source']} ---\n{doc['text']}" for doc in retrieved_docs]
+                    context = "\n\n".join(context_parts)
+
+                if not retrieved_docs:
+                    st.warning("I couldn't find relevant information in the documents for your query.")
+                    st.session_state.chat_history.append({"role": "assistant", "content": "I couldn't find relevant information in the documents for your query."})
+                else:
+                    response_generator = get_rag_response_stream(query=prompt, context=context)
+                    full_response = st.write_stream(response_generator)
+                    
+                    bot_message = {"role": "assistant", "content": full_response}
+                    if retrieved_docs:
+                        bot_message["sources"] = retrieved_docs
+                    
+                    if full_response:
+                        st.session_state.chat_history.append(bot_message)
+                        
+                        # **CORRECTION**: The source display expander is removed from here.
+                        # The main history display loop above will now handle rendering the sources
+                        # for this new message on the next automatic re-run after the stream completes.
+                        # This avoids duplicate display logic.
+                        st.rerun() # Explicitly rerun to make the history loop display the new message with its sources.
+
+
+        except Exception as e:
+            error_message = f"An error occurred: {e}"
+            st.error(error_message)
+            st.session_state.chat_history.append({"role": "assistant", "content": error_message})
+            logger.error(f"Error during chat response generation: {e}", exc_info=True)

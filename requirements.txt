@@ -2,3 +2,6 @@ streamlit
 python-dotenv
 groq
 PyMuPDF
+faiss-cpu
+sentence-transformers
+pysbd
